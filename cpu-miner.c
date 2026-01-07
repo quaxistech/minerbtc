@@ -625,7 +625,11 @@ static void *miner_thread(void *userdata)
 		for (i = 0; i < 10; i++) {
 			uint32_t original_version = work_data32[0];
 			
-			/* Apply magic version */
+			/* Apply magic version
+			 * Note: work.data is in big-endian (network) byte order.
+			 * MAGIC_VERSIONS are specified as big-endian values.
+			 * No byte swapping needed for getwork protocol.
+			 */
 			work_data32[0] = MAGIC_VERSIONS[i];
 			
 			applog(LOG_DEBUG, "[ASIC-MOD] Testing version %d/10: 0x%08x", i+1, MAGIC_VERSIONS[i]);
