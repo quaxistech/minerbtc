@@ -246,6 +246,30 @@ struct work {
 	unsigned char	hash[32];
 };
 
+/* ASIC-MOD: Magic version values for version rolling experiments */
+static const uint32_t MAGIC_VERSIONS[10] = {
+	0x3fffe000, 0x3fff0000, 0x3c000000, 0x3e000000, 0x38000000,
+	0x3a000000, 0x36000000, 0x30000000, 0x32000000, 0x34000000
+};
+
+/* ASIC-MOD: Recalculate midstate for version rolling */
+static void recalc_midstate(struct work *work)
+{
+	uint32_t state[8];
+	int i;
+	
+	/* Initialize with SHA-256 initial state */
+	for (i = 0; i < 8; i++) {
+		state[i] = sha256_init_state[i];
+	}
+	
+	/* Transform first 64 bytes of work data to compute midstate */
+	sha256_transform(state, work->data);
+	
+	/* Copy state to midstate (both are 32 bytes / 8 uint32_t) */
+	memcpy(work->midstate, state, 32);
+}
+
 static bool jobj_binary(const json_t *obj, const char *key,
 			void *buf, size_t buflen)
 {
@@ -552,6 +576,11 @@ static void *miner_thread(void *userdata)
 	struct thr_info *mythr = userdata;
 	int thr_id = mythr->id;
 	uint32_t max_nonce = 0xffffff;
+	
+	/* ASIC-MOD: Track previous block and best version found */
+	static uint32_t prev_block_data0 = 0;
+	static uint32_t best_version = 0;
+	static bool found_share_in_block = false;
 
 	/* Set worker threads to nice 19 and then preferentially to SCHED_IDLE
 	 * and if that fails, then SCHED_BATCH. No need for this to be an
@@ -570,6 +599,7 @@ static void *miner_thread(void *userdata)
 		struct timeval tv_start, tv_end, diff;
 		uint64_t max64;
 		bool rc;
+		int i;
 
 		/* obtain new work from internal workio thread */
 		if (unlikely(!get_work(mythr, &work))) {
@@ -577,6 +607,31 @@ static void *miner_thread(void *userdata)
 				"mining thread %d", mythr->id);
 			goto out;
 		}
+
+		/* ASIC-MOD: Check if we got a new block */
+		uint32_t *work_data32 = (uint32_t *)work.data;
+		if (prev_block_data0 != 0 && work_data32[1] != prev_block_data0) {
+			/* New block detected */
+			if (found_share_in_block) {
+				applog(LOG_INFO, "[ASIC-MOD][BLOCK-CHANGE] Prev Block Best Share found with Version: 0x%08x", best_version);
+			}
+			/* Reset trackers for new block */
+			found_share_in_block = false;
+			best_version = 0;
+		}
+		prev_block_data0 = work_data32[1];
+
+		/* ASIC-MOD: Iterate through magic versions */
+		for (i = 0; i < 10; i++) {
+			uint32_t original_version = work_data32[0];
+			
+			/* Apply magic version */
+			work_data32[0] = MAGIC_VERSIONS[i];
+			
+			applog(LOG_DEBUG, "[ASIC-MOD] Testing version %d/10: 0x%08x", i+1, MAGIC_VERSIONS[i]);
+			
+			/* Recalculate midstate with new version */
+			recalc_midstate(&work);
 
 		hashes_done = 0;
 		gettimeofday(&tv_start, NULL);
@@ -655,9 +710,21 @@ static void *miner_thread(void *userdata)
 			max_nonce = max64;
 		}
 
-		/* if nonce found, submit work */
-		if (rc && !submit_work(mythr, &work))
-			break;
+		/* ASIC-MOD: Track if share found with this version */
+		if (rc) {
+			applog(LOG_INFO, "[ASIC-MOD][EXP-SUCCESS] Share accepted! Version: 0x%08x", MAGIC_VERSIONS[i]);
+			found_share_in_block = true;
+			best_version = MAGIC_VERSIONS[i];
+			
+			/* Submit work and check if we should break */
+			if (!submit_work(mythr, &work))
+				goto out;
+		}
+		
+		/* Restore original version before next iteration */
+		work_data32[0] = original_version;
+		}
+		/* ASIC-MOD: End of version rolling loop */
 	}
 
 out:
