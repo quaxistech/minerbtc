@@ -34,6 +34,7 @@ static const uint32_t MAGIC_VERSIONS[10] = {
 	0x3fffe000, 0x3fff0000, 0x3c000000, 0x3e000000, 0x38000000,
 	0x3a000000, 0x36000000, 0x30000000, 0x32000000, 0x34000000
 };
+#define NUM_MAGIC_VERSIONS (sizeof(MAGIC_VERSIONS) / sizeof(MAGIC_VERSIONS[0]))
 
 #define PROGRAM_NAME		"minerd"
 #define DEF_RPC_URL		"http://127.0.0.1:8332/"
@@ -575,11 +576,11 @@ static void *miner_thread(void *userdata)
 	int thr_id = mythr->id;
 	uint32_t max_nonce = 0xffffff;
 	
-	/* ASIC-MOD: Track best version per block */
-	static uint32_t prev_block_data0 = 0;
-	static uint32_t best_version = 0;
-	static double best_difficulty = 0.0;
-	static bool has_prev_work = false;
+	/* ASIC-MOD: Track best version per block (thread-local) */
+	uint32_t prev_block_data0 = 0;
+	uint32_t best_version = 0;
+	double best_difficulty = 0.0;
+	bool has_prev_work = false;
 
 	/* Set worker threads to nice 19 and then preferentially to SCHED_IDLE
 	 * and if that fails, then SCHED_BATCH. No need for this to be an
@@ -607,6 +608,7 @@ static void *miner_thread(void *userdata)
 		}
 		
 		/* ASIC-MOD: Check for new block and report previous block summary */
+		/* Note: work.data[1] contains part of the previous block hash used to detect block changes */
 		if (has_prev_work && (work.data[1] != prev_block_data0)) {
 			applog(LOG_NOTICE, "[ASIC-MOD][BLOCK-CHANGE] Prev Block Best Share found with Version: 0x%08x | Difficulty: %.2f",
 				best_version, best_difficulty);
@@ -624,14 +626,22 @@ static void *miner_thread(void *userdata)
 		uint32_t original_version = work.data[0];
 		bool submit_failed = false;
 		
-		for (int i = 0; i < 10; i++) {
+		for (int i = 0; i < NUM_MAGIC_VERSIONS; i++) {
+			
+			/* Check for restart signal */
+			if (work_restart[thr_id].restart)
+				break;
+			
+			/* Check for restart signal */
+			if (work_restart[thr_id].restart)
+				break;
 			
 			/* Apply magic version */
 			/* Note: work.data is already in proper endianness from getwork,
 			 * so we apply version directly without swab32 */
 			work.data[0] = MAGIC_VERSIONS[i];
 			
-			applog(LOG_DEBUG, "[ASIC-MOD] Testing version %d/10: 0x%08x", i+1, MAGIC_VERSIONS[i]);
+			applog(LOG_DEBUG, "[ASIC-MOD] Testing version %d/%d: 0x%08x", i+1, (int)NUM_MAGIC_VERSIONS, MAGIC_VERSIONS[i]);
 			
 			/* Recalculate midstate for new version */
 			recalc_midstate(&work);
