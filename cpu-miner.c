@@ -639,6 +639,9 @@ static void *miner_thread(void *userdata)
 		memcpy(prev_merkle_root, current_merkle, 32);
 		first_work = false;
 
+		hashes_done = 0;
+		gettimeofday(&tv_start, NULL);
+
 		/* ASIC-MOD: Iterate through magic versions */
 		for (i = 0; i < 10; i++) {
 			uint32_t magic_version = MAGIC_VERSIONS[i];
@@ -657,65 +660,79 @@ static void *miner_thread(void *userdata)
 			/* Recalculate midstate with new version */
 			recalc_midstate(&work);
 
-		hashes_done = 0;
-		gettimeofday(&tv_start, NULL);
-
-		/* scan nonces for a proof-of-work hash */
-		switch (opt_algo) {
-		case ALGO_C:
-			rc = scanhash_c(thr_id, work.midstate, work.data + 64,
-				        work.hash, work.target,
-					max_nonce, &hashes_done);
-			break;
+			/* scan nonces for a proof-of-work hash */
+			switch (opt_algo) {
+			case ALGO_C:
+				rc = scanhash_c(thr_id, work.midstate, work.data + 64,
+					        work.hash, work.target,
+						max_nonce, &hashes_done);
+				break;
 
 #ifdef WANT_X8664_SSE2
-		case ALGO_SSE2_64: {
-			unsigned int rc5 =
-			        scanhash_sse2_64(thr_id, work.midstate, work.data + 64,
-						 work.hash1, work.hash,
-						 work.target,
-					         max_nonce, &hashes_done);
-			rc = (rc5 == -1) ? false : true;
-			}
-			break;
+			case ALGO_SSE2_64: {
+				unsigned int rc5 =
+				        scanhash_sse2_64(thr_id, work.midstate, work.data + 64,
+							 work.hash1, work.hash,
+							 work.target,
+						         max_nonce, &hashes_done);
+				rc = (rc5 == -1) ? false : true;
+				}
+				break;
 #endif
 
 #ifdef WANT_SSE2_4WAY
-		case ALGO_4WAY: {
-			unsigned int rc4 =
-				ScanHash_4WaySSE2(thr_id, work.midstate, work.data + 64,
-						  work.hash1, work.hash,
-						  work.target,
-						  max_nonce, &hashes_done);
-			rc = (rc4 == -1) ? false : true;
-			}
-			break;
+			case ALGO_4WAY: {
+				unsigned int rc4 =
+					ScanHash_4WaySSE2(thr_id, work.midstate, work.data + 64,
+							  work.hash1, work.hash,
+							  work.target,
+							  max_nonce, &hashes_done);
+				rc = (rc4 == -1) ? false : true;
+				}
+				break;
 #endif
 
 #ifdef WANT_VIA_PADLOCK
-		case ALGO_VIA:
-			rc = scanhash_via(thr_id, work.data, work.target,
-					  max_nonce, &hashes_done);
-			break;
+			case ALGO_VIA:
+				rc = scanhash_via(thr_id, work.data, work.target,
+						  max_nonce, &hashes_done);
+				break;
 #endif
-		case ALGO_CRYPTOPP:
-			rc = scanhash_cryptopp(thr_id, work.midstate, work.data + 64,
-				        work.hash, work.target,
-					max_nonce, &hashes_done);
-			break;
+			case ALGO_CRYPTOPP:
+				rc = scanhash_cryptopp(thr_id, work.midstate, work.data + 64,
+					        work.hash, work.target,
+						max_nonce, &hashes_done);
+				break;
 
 #ifdef WANT_CRYPTOPP_ASM32
-		case ALGO_CRYPTOPP_ASM32:
-			rc = scanhash_asm32(thr_id, work.midstate, work.data + 64,
-				        work.hash, work.target,
-					max_nonce, &hashes_done);
-			break;
+			case ALGO_CRYPTOPP_ASM32:
+				rc = scanhash_asm32(thr_id, work.midstate, work.data + 64,
+					        work.hash, work.target,
+						max_nonce, &hashes_done);
+				break;
 #endif
 
-		default:
-			/* should never happen */
-			goto out;
+			default:
+				/* should never happen */
+				goto out;
+			}
+
+			/* ASIC-MOD: Track if share found with this version */
+			if (rc) {
+				applog(LOG_INFO, "[ASIC-MOD][EXP-SUCCESS] Share accepted! Version: 0x%08x", MAGIC_VERSIONS[i]);
+				found_share_in_block = true;
+				best_version = MAGIC_VERSIONS[i];
+				
+				/* Submit work - if it fails, log but continue trying other versions */
+				if (!submit_work(mythr, &work)) {
+					applog(LOG_ERR, "[ASIC-MOD] Submit failed for version 0x%08x, continuing with next version", MAGIC_VERSIONS[i]);
+				}
+			}
 		}
+		/* ASIC-MOD: End of version rolling loop */
+		
+		/* Restore original version after testing all versions */
+		memcpy(work.data, &original_version, sizeof(uint32_t));
 
 		/* record scanhash elapsed time */
 		gettimeofday(&tv_end, NULL);
@@ -733,23 +750,6 @@ static void *miner_thread(void *userdata)
 				max64 = 0xfffffffaULL;
 			max_nonce = max64;
 		}
-
-		/* ASIC-MOD: Track if share found with this version */
-		if (rc) {
-			applog(LOG_INFO, "[ASIC-MOD][EXP-SUCCESS] Share accepted! Version: 0x%08x", MAGIC_VERSIONS[i]);
-			found_share_in_block = true;
-			best_version = MAGIC_VERSIONS[i];
-			
-			/* Submit work - if it fails, log but continue trying other versions */
-			if (!submit_work(mythr, &work)) {
-				applog(LOG_ERR, "[ASIC-MOD] Submit failed for version 0x%08x, continuing with next version", MAGIC_VERSIONS[i]);
-			}
-		}
-		}
-		/* ASIC-MOD: End of version rolling loop */
-		
-		/* Restore original version after testing all versions */
-		memcpy(work.data, &original_version, sizeof(uint32_t));
 	}
 
 out:
