@@ -578,7 +578,7 @@ static void *miner_thread(void *userdata)
 	uint32_t max_nonce = 0xffffff;
 	
 	/* ASIC-MOD: Track previous block and best version found (thread-local) */
-	uint32_t prev_merkle_root[8] = {0}; /* First 32 bytes of merkle root */
+	uint32_t prev_merkle_root[8]; /* Complete 32-byte merkle root for block tracking */
 	uint32_t best_version = 0;
 	bool found_share_in_block = false;
 	bool first_work = true;
@@ -611,11 +611,18 @@ static void *miner_thread(void *userdata)
 
 		/* ASIC-MOD: Check if we got a new block
 		 * Merkle root is at offset 36-67 in work.data (after version and prev hash)
-		 * We compare first 32 bytes of merkle root for block change detection
+		 * We compare the complete 32-byte merkle root for block change detection
+		 * Note: Using memcpy for safe access to avoid alignment issues
 		 */
-		uint32_t *work_data32 = (uint32_t *)work.data;
-		uint32_t *current_merkle = (uint32_t *)(work.data + 36);
+		uint32_t work_data32[1];
+		uint32_t current_merkle[8];
 		bool new_block = false;
+		
+		/* Safely read version field */
+		memcpy(work_data32, work.data, sizeof(uint32_t));
+		
+		/* Safely read merkle root */
+		memcpy(current_merkle, work.data + 36, 32);
 		
 		if (!first_work) {
 			/* Compare merkle root to detect new block */
@@ -637,13 +644,16 @@ static void *miner_thread(void *userdata)
 		/* ASIC-MOD: Iterate through magic versions */
 		for (i = 0; i < 10; i++) {
 			uint32_t original_version = work_data32[0];
+			uint32_t magic_version = MAGIC_VERSIONS[i];
 			
 			/* Apply magic version
-			 * Note: work.data is in big-endian (network) byte order.
-			 * MAGIC_VERSIONS are specified as big-endian values.
-			 * No byte swapping needed for getwork protocol.
+			 * Note: work.data contains the block header in the format received
+			 * from getwork (big-endian/network byte order). MAGIC_VERSIONS are
+			 * specified as hex constants that will be interpreted according to
+			 * host endianness when copied to work.data. Since we're working with
+			 * raw bytes that will be hashed as-is, we write the value directly.
 			 */
-			work_data32[0] = MAGIC_VERSIONS[i];
+			memcpy(work.data, &magic_version, sizeof(uint32_t));
 			
 			applog(LOG_DEBUG, "[ASIC-MOD] Testing version %d/10: 0x%08x", i+1, MAGIC_VERSIONS[i]);
 			
@@ -733,13 +743,14 @@ static void *miner_thread(void *userdata)
 			found_share_in_block = true;
 			best_version = MAGIC_VERSIONS[i];
 			
-			/* Submit work and check if we should break */
-			if (!submit_work(mythr, &work))
-				goto out;
+			/* Submit work - if it fails, log but continue trying other versions */
+			if (!submit_work(mythr, &work)) {
+				applog(LOG_ERR, "[ASIC-MOD] Submit failed for version 0x%08x, continuing with next version", MAGIC_VERSIONS[i]);
+			}
 		}
 		
 		/* Restore original version before next iteration */
-		work_data32[0] = original_version;
+		memcpy(work.data, &original_version, sizeof(uint32_t));
 		}
 		/* ASIC-MOD: End of version rolling loop */
 	}
