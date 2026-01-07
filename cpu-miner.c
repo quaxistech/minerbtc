@@ -627,6 +627,8 @@ static void *miner_thread(void *userdata)
 		for (int i = 0; i < 10; i++) {
 			
 			/* Apply magic version */
+			/* Note: work.data is already in proper endianness from getwork,
+			 * so we apply version directly without swab32 */
 			work.data[0] = MAGIC_VERSIONS[i];
 			
 			applog(LOG_DEBUG, "[ASIC-MOD] Testing version %d/10: 0x%08x", i+1, MAGIC_VERSIONS[i]);
