@@ -579,7 +579,6 @@ static void *miner_thread(void *userdata)
 	/* ASIC-MOD: Track best version per block (thread-local) */
 	uint32_t prev_block_data0 = 0;
 	uint32_t best_version = 0;
-	double best_difficulty = 0.0;
 	bool has_prev_work = false;
 
 	/* Set worker threads to nice 19 and then preferentially to SCHED_IDLE
@@ -610,11 +609,12 @@ static void *miner_thread(void *userdata)
 		/* ASIC-MOD: Check for new block and report previous block summary */
 		/* Note: work.data[1] contains part of the previous block hash used to detect block changes */
 		if (has_prev_work && (work.data[1] != prev_block_data0)) {
-			applog(LOG_NOTICE, "[ASIC-MOD][BLOCK-CHANGE] Prev Block Best Share found with Version: 0x%08x | Difficulty: %.2f",
-				best_version, best_difficulty);
+			if (best_version != 0) {
+				applog(LOG_NOTICE, "[ASIC-MOD][BLOCK-CHANGE] Prev Block Best Share found with Version: 0x%08x",
+					best_version);
+			}
 			/* Reset tracking for new block */
 			best_version = 0;
-			best_difficulty = 0.0;
 		}
 		
 		/* Store current block identifier */
@@ -627,10 +627,6 @@ static void *miner_thread(void *userdata)
 		bool submit_failed = false;
 		
 		for (int i = 0; i < NUM_MAGIC_VERSIONS; i++) {
-			
-			/* Check for restart signal */
-			if (work_restart[thr_id].restart)
-				break;
 			
 			/* Check for restart signal */
 			if (work_restart[thr_id].restart)
@@ -725,14 +721,10 @@ static void *miner_thread(void *userdata)
 
 			/* ASIC-MOD: Track and log successful shares */
 			if (rc) {
-				double difficulty = 1.0; /* Simplified - would need actual difficulty calculation */
-				applog(LOG_NOTICE, "[ASIC-MOD][EXP-SUCCESS] Share accepted! Version: 0x%08x", MAGIC_VERSIONS[i]);
+				applog(LOG_NOTICE, "[ASIC-MOD][EXP-SUCCESS] Valid share found with Version: 0x%08x", MAGIC_VERSIONS[i]);
 				
-				/* Update best version tracker */
-				if (difficulty > best_difficulty) {
-					best_difficulty = difficulty;
-					best_version = MAGIC_VERSIONS[i];
-				}
+				/* Track best version for this block */
+				best_version = MAGIC_VERSIONS[i];
 				
 				/* Submit work */
 				if (!submit_work(mythr, &work)) {

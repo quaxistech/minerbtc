@@ -10,9 +10,6 @@ typedef struct {
 	uint8_t buffer[64];
 } sha256_ctx;
 
-/* SHA256 initialization state */
-extern const uint32_t sha256_init_state[8];
-
 /* SHA256 transform function - processes one 64-byte block */
 void sha256_transform(uint32_t *state, const uint8_t *input);
 
