@@ -62,23 +62,25 @@ static inline void BLEND_OP(int I, u32 *W)
 	W[I] = s1(W[I-2]) + W[I-7] + s0(W[I-15]) + W[I-16];
 }
 
-void sha256_transform(u32 *state, const u8 *input)
+void sha256_transform(uint32_t *state, const uint8_t *input)
 {
+	u32 *state_u32 = (u32 *)state;
+	const u8 *input_u8 = (const u8 *)input;
 	u32 a, b, c, d, e, f, g, h, t1, t2;
 	u32 W[64];
 	int i;
 
 	/* load the input */
 	for (i = 0; i < 16; i++)
-		LOAD_OP(i, W, input);
+		LOAD_OP(i, W, input_u8);
 
 	/* now blend */
 	for (i = 16; i < 64; i++)
 		BLEND_OP(i, W);
 
 	/* load the state into our registers */
-	a=state[0];  b=state[1];  c=state[2];  d=state[3];
-	e=state[4];  f=state[5];  g=state[6];  h=state[7];
+	a=state_u32[0];  b=state_u32[1];  c=state_u32[2];  d=state_u32[3];
+	e=state_u32[4];  f=state_u32[5];  g=state_u32[6];  h=state_u32[7];
 
 	/* now iterate */
 	t1 = h + e1(e) + Ch(e,f,g) + 0x428a2f98 + W[ 0];
@@ -217,8 +219,8 @@ void sha256_transform(u32 *state, const u8 *input)
 	t1 = a + e1(f) + Ch(f,g,h) + 0xc67178f2 + W[63];
 	t2 = e0(b) + Maj(b,c,d);    e+=t1;    a=t1+t2;
 
-	state[0] += a; state[1] += b; state[2] += c; state[3] += d;
-	state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+	state_u32[0] += a; state_u32[1] += b; state_u32[2] += c; state_u32[3] += d;
+	state_u32[4] += e; state_u32[5] += f; state_u32[6] += g; state_u32[7] += h;
 
 #if 0
 	/* clear any sensitive info... */
