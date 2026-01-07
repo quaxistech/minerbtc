@@ -666,6 +666,9 @@ static void *miner_thread(void *userdata)
 		int version_idx;
 		for (version_idx = 0; version_idx < 10; version_idx++) {
 			/* Apply the magic version */
+			/* Note: work.data from getwork is already in network byte order.
+			 * No swab32 needed as this miner uses getwork protocol, not stratum.
+			 * The version field (work.data[0]) can be set directly. */
 			((uint32_t*)work.data)[0] = MAGIC_VERSIONS[version_idx];
 			
 			/* Recalculate midstate after version change */
