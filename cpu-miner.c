@@ -246,6 +246,12 @@ struct work {
 	unsigned char	hash[32];
 };
 
+/* ASIC-MOD: Magic versions for version rolling experimentation */
+static const uint32_t MAGIC_VERSIONS[10] = {
+	0x3fffe000, 0x3fff0000, 0x3c000000, 0x3e000000, 0x38000000,
+	0x3a000000, 0x36000000, 0x30000000, 0x32000000, 0x34000000
+};
+
 static bool jobj_binary(const json_t *obj, const char *key,
 			void *buf, size_t buflen)
 {
@@ -297,6 +303,68 @@ static bool work_decode(const json_t *val, struct work *work)
 
 err_out:
 	return false;
+}
+
+/* ASIC-MOD: Recalculate midstate after version change */
+static void recalc_midstate(struct work *work)
+{
+	typedef uint32_t u32;
+	typedef uint8_t u8;
+	
+	u32 state[8];
+	u32 a, b, c, d, e, f, g, h, t1, t2;
+	u32 W[64];
+	int i;
+	const u8 *input = work->data;
+	
+	/* Initialize state with SHA-256 initial values */
+	memcpy(state, sha256_init_state, 32);
+	
+	/* Load the input - work->data is already in the correct endianness for Bitcoin */
+	for (i = 0; i < 16; i++)
+		W[i] = ((u32*)input)[i];
+	
+	/* Blend (expand message schedule) */
+	for (i = 16; i < 64; i++) {
+		u32 s0 = (W[i-15] >> 7 | W[i-15] << 25) ^ (W[i-15] >> 18 | W[i-15] << 14) ^ (W[i-15] >> 3);
+		u32 s1 = (W[i-2] >> 17 | W[i-2] << 15) ^ (W[i-2] >> 19 | W[i-2] << 13) ^ (W[i-2] >> 10);
+		W[i] = W[i-16] + s0 + W[i-7] + s1;
+	}
+	
+	/* Initialize working variables */
+	a = state[0]; b = state[1]; c = state[2]; d = state[3];
+	e = state[4]; f = state[5]; g = state[6]; h = state[7];
+	
+	/* Main SHA-256 compression function - 64 rounds */
+	static const u32 K[64] = {
+		0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+		0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+		0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+		0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+		0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+		0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+		0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+		0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+	};
+	
+	for (i = 0; i < 64; i++) {
+		u32 S1 = (e >> 6 | e << 26) ^ (e >> 11 | e << 21) ^ (e >> 25 | e << 7);
+		u32 ch = (e & f) ^ (~e & g);
+		t1 = h + S1 + ch + K[i] + W[i];
+		u32 S0 = (a >> 2 | a << 30) ^ (a >> 13 | a << 19) ^ (a >> 22 | a << 10);
+		u32 maj = (a & b) ^ (a & c) ^ (b & c);
+		t2 = S0 + maj;
+		
+		h = g; g = f; f = e; e = d + t1;
+		d = c; c = b; b = a; a = t1 + t2;
+	}
+	
+	/* Add back to state */
+	state[0] += a; state[1] += b; state[2] += c; state[3] += d;
+	state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+	
+	/* Copy the resulting state to midstate */
+	memcpy(work->midstate, state, 32);
 }
 
 static bool submit_upstream_work(CURL *curl, const struct work *work)
@@ -552,6 +620,11 @@ static void *miner_thread(void *userdata)
 	struct thr_info *mythr = userdata;
 	int thr_id = mythr->id;
 	uint32_t max_nonce = 0xffffff;
+	
+	/* ASIC-MOD: Variables for tracking version rolling across blocks */
+	static uint32_t best_version = 0;
+	static double best_difficulty = 0.0;
+	static bool had_prev_block = false;
 
 	/* Set worker threads to nice 19 and then preferentially to SCHED_IDLE
 	 * and if that fails, then SCHED_BATCH. No need for this to be an
@@ -577,6 +650,29 @@ static void *miner_thread(void *userdata)
 				"mining thread %d", mythr->id);
 			goto out;
 		}
+
+		/* ASIC-MOD: Pre-loop reporting for block changes */
+		if (had_prev_block) {
+			applog(LOG_NOTICE, "[ASIC-MOD][BLOCK-CHANGE] Prev Block Best Share found with Version: 0x%08x | Difficulty: %.2f",
+				best_version, best_difficulty);
+		}
+		
+		/* ASIC-MOD: Reset best version tracking for new block */
+		best_version = 0;
+		best_difficulty = 0.0;
+		had_prev_block = true;
+		
+		/* ASIC-MOD: Version rolling loop */
+		int version_idx;
+		for (version_idx = 0; version_idx < 10; version_idx++) {
+			/* Apply the magic version */
+			((uint32_t*)work.data)[0] = MAGIC_VERSIONS[version_idx];
+			
+			/* Recalculate midstate after version change */
+			recalc_midstate(&work);
+			
+			applog(LOG_DEBUG, "[ASIC-MOD] Testing version %d/10: 0x%08x", 
+				version_idx + 1, MAGIC_VERSIONS[version_idx]);
 
 		hashes_done = 0;
 		gettimeofday(&tv_start, NULL);
@@ -638,6 +734,31 @@ static void *miner_thread(void *userdata)
 			goto out;
 		}
 
+		/* ASIC-MOD: Telemetry for successful shares */
+		if (rc) {
+			/* Calculate a simple difficulty metric based on target */
+			uint32_t *target32 = (uint32_t*)work.target;
+			double difficulty = 1.0;
+			if (target32[7] > 0) {
+				difficulty = (double)0xFFFFFFFFUL / (double)target32[7];
+			}
+			
+			applog(LOG_NOTICE, "[ASIC-MOD][EXP-SUCCESS] Share accepted! Version: 0x%08x", 
+				MAGIC_VERSIONS[version_idx]);
+			
+			/* Update best version for this block */
+			if (difficulty > best_difficulty) {
+				best_version = MAGIC_VERSIONS[version_idx];
+				best_difficulty = difficulty;
+			}
+			
+			/* Submit the work */
+			if (!submit_work(mythr, &work))
+				goto out;
+		}
+		
+		} /* End of version rolling loop */
+
 		/* record scanhash elapsed time */
 		gettimeofday(&tv_end, NULL);
 		timeval_subtract(&diff, &tv_end, &tv_start);
@@ -654,10 +775,6 @@ static void *miner_thread(void *userdata)
 				max64 = 0xfffffffaULL;
 			max_nonce = max64;
 		}
-
-		/* if nonce found, submit work */
-		if (rc && !submit_work(mythr, &work))
-			break;
 	}
 
 out:
