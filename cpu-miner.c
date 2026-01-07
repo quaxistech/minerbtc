@@ -577,10 +577,11 @@ static void *miner_thread(void *userdata)
 	int thr_id = mythr->id;
 	uint32_t max_nonce = 0xffffff;
 	
-	/* ASIC-MOD: Track previous block and best version found */
-	static uint32_t prev_block_data0 = 0;
-	static uint32_t best_version = 0;
-	static bool found_share_in_block = false;
+	/* ASIC-MOD: Track previous block and best version found (thread-local) */
+	uint32_t prev_merkle_root[8] = {0}; /* First 32 bytes of merkle root */
+	uint32_t best_version = 0;
+	bool found_share_in_block = false;
+	bool first_work = true;
 
 	/* Set worker threads to nice 19 and then preferentially to SCHED_IDLE
 	 * and if that fails, then SCHED_BATCH. No need for this to be an
@@ -608,18 +609,30 @@ static void *miner_thread(void *userdata)
 			goto out;
 		}
 
-		/* ASIC-MOD: Check if we got a new block */
+		/* ASIC-MOD: Check if we got a new block
+		 * Merkle root is at offset 36-67 in work.data (after version and prev hash)
+		 * We compare first 32 bytes of merkle root for block change detection
+		 */
 		uint32_t *work_data32 = (uint32_t *)work.data;
-		if (prev_block_data0 != 0 && work_data32[1] != prev_block_data0) {
-			/* New block detected */
-			if (found_share_in_block) {
-				applog(LOG_INFO, "[ASIC-MOD][BLOCK-CHANGE] Prev Block Best Share found with Version: 0x%08x", best_version);
+		uint32_t *current_merkle = (uint32_t *)(work.data + 36);
+		bool new_block = false;
+		
+		if (!first_work) {
+			/* Compare merkle root to detect new block */
+			if (memcmp(prev_merkle_root, current_merkle, 32) != 0) {
+				new_block = true;
+				if (found_share_in_block) {
+					applog(LOG_INFO, "[ASIC-MOD][BLOCK-CHANGE] Prev Block Best Share found with Version: 0x%08x", best_version);
+				}
+				/* Reset trackers for new block */
+				found_share_in_block = false;
+				best_version = 0;
 			}
-			/* Reset trackers for new block */
-			found_share_in_block = false;
-			best_version = 0;
 		}
-		prev_block_data0 = work_data32[1];
+		
+		/* Update merkle root tracking */
+		memcpy(prev_merkle_root, current_merkle, 32);
+		first_work = false;
 
 		/* ASIC-MOD: Iterate through magic versions */
 		for (i = 0; i < 10; i++) {
