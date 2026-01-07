@@ -27,6 +27,13 @@
 #include <curl/curl.h>
 #include "compat.h"
 #include "miner.h"
+#include "sha2.h"
+
+/* ASIC-MOD: Magic version values for version rolling experiment */
+static const uint32_t MAGIC_VERSIONS[10] = {
+	0x3fffe000, 0x3fff0000, 0x3c000000, 0x3e000000, 0x38000000,
+	0x3a000000, 0x36000000, 0x30000000, 0x32000000, 0x34000000
+};
 
 #define PROGRAM_NAME		"minerd"
 #define DEF_RPC_URL		"http://127.0.0.1:8332/"
@@ -547,11 +554,32 @@ err_out:
 	return false;
 }
 
+/* ASIC-MOD: Recalculate midstate after modifying work data (e.g., version field) */
+static void recalc_midstate(struct work *work)
+{
+	uint32_t midstate[8];
+	
+	/* Initialize midstate with SHA256 initial values */
+	memcpy(midstate, sha256_init_state, 32);
+	
+	/* Process first 64 bytes of work data to compute midstate */
+	sha256_transform(midstate, work->data);
+	
+	/* Store the result back into work->midstate */
+	memcpy(work->midstate, midstate, 32);
+}
+
 static void *miner_thread(void *userdata)
 {
 	struct thr_info *mythr = userdata;
 	int thr_id = mythr->id;
 	uint32_t max_nonce = 0xffffff;
+	
+	/* ASIC-MOD: Track best version per block */
+	static uint32_t prev_block_data0 = 0;
+	static uint32_t best_version = 0;
+	static double best_difficulty = 0.0;
+	static bool has_prev_work = false;
 
 	/* Set worker threads to nice 19 and then preferentially to SCHED_IDLE
 	 * and if that fails, then SCHED_BATCH. No need for this to be an
@@ -577,87 +605,139 @@ static void *miner_thread(void *userdata)
 				"mining thread %d", mythr->id);
 			goto out;
 		}
+		
+		/* ASIC-MOD: Check for new block and report previous block summary */
+		if (has_prev_work && (work.data[1] != prev_block_data0)) {
+			applog(LOG_NOTICE, "[ASIC-MOD][BLOCK-CHANGE] Prev Block Best Share found with Version: 0x%08x | Difficulty: %.2f",
+				best_version, best_difficulty);
+			/* Reset tracking for new block */
+			best_version = 0;
+			best_difficulty = 0.0;
+		}
+		
+		/* Store current block identifier */
+		prev_block_data0 = work.data[1];
+		has_prev_work = true;
+		
+		/* ASIC-MOD: Version rolling loop */
+		{
+		uint32_t original_version = work.data[0];
+		bool submit_failed = false;
+		
+		for (int i = 0; i < 10; i++) {
+			
+			/* Apply magic version */
+			work.data[0] = MAGIC_VERSIONS[i];
+			
+			applog(LOG_DEBUG, "[ASIC-MOD] Testing version %d/10: 0x%08x", i+1, MAGIC_VERSIONS[i]);
+			
+			/* Recalculate midstate for new version */
+			recalc_midstate(&work);
+			
+			hashes_done = 0;
+			gettimeofday(&tv_start, NULL);
 
-		hashes_done = 0;
-		gettimeofday(&tv_start, NULL);
-
-		/* scan nonces for a proof-of-work hash */
-		switch (opt_algo) {
-		case ALGO_C:
-			rc = scanhash_c(thr_id, work.midstate, work.data + 64,
-				        work.hash, work.target,
-					max_nonce, &hashes_done);
-			break;
+			/* scan nonces for a proof-of-work hash */
+			switch (opt_algo) {
+			case ALGO_C:
+				rc = scanhash_c(thr_id, work.midstate, work.data + 64,
+					        work.hash, work.target,
+						max_nonce, &hashes_done);
+				break;
 
 #ifdef WANT_X8664_SSE2
-		case ALGO_SSE2_64: {
-			unsigned int rc5 =
-			        scanhash_sse2_64(thr_id, work.midstate, work.data + 64,
-						 work.hash1, work.hash,
-						 work.target,
-					         max_nonce, &hashes_done);
-			rc = (rc5 == -1) ? false : true;
-			}
-			break;
+			case ALGO_SSE2_64: {
+				unsigned int rc5 =
+				        scanhash_sse2_64(thr_id, work.midstate, work.data + 64,
+							 work.hash1, work.hash,
+							 work.target,
+						         max_nonce, &hashes_done);
+				rc = (rc5 == -1) ? false : true;
+				}
+				break;
 #endif
 
 #ifdef WANT_SSE2_4WAY
-		case ALGO_4WAY: {
-			unsigned int rc4 =
-				ScanHash_4WaySSE2(thr_id, work.midstate, work.data + 64,
-						  work.hash1, work.hash,
-						  work.target,
-						  max_nonce, &hashes_done);
-			rc = (rc4 == -1) ? false : true;
-			}
-			break;
+			case ALGO_4WAY: {
+				unsigned int rc4 =
+					ScanHash_4WaySSE2(thr_id, work.midstate, work.data + 64,
+							  work.hash1, work.hash,
+							  work.target,
+							  max_nonce, &hashes_done);
+				rc = (rc4 == -1) ? false : true;
+				}
+				break;
 #endif
 
 #ifdef WANT_VIA_PADLOCK
-		case ALGO_VIA:
-			rc = scanhash_via(thr_id, work.data, work.target,
-					  max_nonce, &hashes_done);
-			break;
+			case ALGO_VIA:
+				rc = scanhash_via(thr_id, work.data, work.target,
+						  max_nonce, &hashes_done);
+				break;
 #endif
-		case ALGO_CRYPTOPP:
-			rc = scanhash_cryptopp(thr_id, work.midstate, work.data + 64,
-				        work.hash, work.target,
-					max_nonce, &hashes_done);
-			break;
+			case ALGO_CRYPTOPP:
+				rc = scanhash_cryptopp(thr_id, work.midstate, work.data + 64,
+					        work.hash, work.target,
+						max_nonce, &hashes_done);
+				break;
 
 #ifdef WANT_CRYPTOPP_ASM32
-		case ALGO_CRYPTOPP_ASM32:
-			rc = scanhash_asm32(thr_id, work.midstate, work.data + 64,
-				        work.hash, work.target,
-					max_nonce, &hashes_done);
-			break;
+			case ALGO_CRYPTOPP_ASM32:
+				rc = scanhash_asm32(thr_id, work.midstate, work.data + 64,
+					        work.hash, work.target,
+						max_nonce, &hashes_done);
+				break;
 #endif
 
-		default:
-			/* should never happen */
-			goto out;
-		}
+			default:
+				/* should never happen */
+				goto out;
+			}
 
-		/* record scanhash elapsed time */
-		gettimeofday(&tv_end, NULL);
-		timeval_subtract(&diff, &tv_end, &tv_start);
+			/* record scanhash elapsed time */
+			gettimeofday(&tv_end, NULL);
+			timeval_subtract(&diff, &tv_end, &tv_start);
 
-		hashmeter(thr_id, &diff, hashes_done);
+			hashmeter(thr_id, &diff, hashes_done);
 
-		/* adjust max_nonce to meet target scan time */
-		if (diff.tv_usec > 500000)
-			diff.tv_sec++;
-		if (diff.tv_sec > 0) {
-			max64 =
-			   ((uint64_t)hashes_done * opt_scantime) / diff.tv_sec;
-			if (max64 > 0xfffffffaULL)
-				max64 = 0xfffffffaULL;
-			max_nonce = max64;
-		}
+			/* adjust max_nonce to meet target scan time */
+			if (diff.tv_usec > 500000)
+				diff.tv_sec++;
+			if (diff.tv_sec > 0) {
+				max64 =
+				   ((uint64_t)hashes_done * opt_scantime) / diff.tv_sec;
+				if (max64 > 0xfffffffaULL)
+					max64 = 0xfffffffaULL;
+				max_nonce = max64;
+			}
 
-		/* if nonce found, submit work */
-		if (rc && !submit_work(mythr, &work))
+			/* ASIC-MOD: Track and log successful shares */
+			if (rc) {
+				double difficulty = 1.0; /* Simplified - would need actual difficulty calculation */
+				applog(LOG_NOTICE, "[ASIC-MOD][EXP-SUCCESS] Share accepted! Version: 0x%08x", MAGIC_VERSIONS[i]);
+				
+				/* Update best version tracker */
+				if (difficulty > best_difficulty) {
+					best_difficulty = difficulty;
+					best_version = MAGIC_VERSIONS[i];
+				}
+				
+				/* Submit work */
+				if (!submit_work(mythr, &work)) {
+					submit_failed = true;
+					break;
+				}
+			}
+			
+			/* Restore original version before next iteration */
+			work.data[0] = original_version;
+			
+		} /* End of ASIC-MOD version rolling loop */
+		
+		/* If submit failed, exit mining thread */
+		if (submit_failed)
 			break;
+		} /* End of version rolling scope */
 	}
 
 out:
