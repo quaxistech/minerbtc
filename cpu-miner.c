@@ -620,11 +620,12 @@ static void *miner_thread(void *userdata)
 	struct thr_info *mythr = userdata;
 	int thr_id = mythr->id;
 	uint32_t max_nonce = 0xffffff;
+	int version_idx;
 	
-	/* ASIC-MOD: Variables for tracking version rolling across blocks */
-	static uint32_t best_version = 0;
-	static double best_difficulty = 0.0;
-	static bool had_prev_block = false;
+	/* ASIC-MOD: Variables for tracking version rolling across blocks (per-thread) */
+	uint32_t best_version = 0;
+	double best_difficulty = 0.0;
+	bool had_prev_block = false;
 
 	/* Set worker threads to nice 19 and then preferentially to SCHED_IDLE
 	 * and if that fails, then SCHED_BATCH. No need for this to be an
@@ -662,9 +663,14 @@ static void *miner_thread(void *userdata)
 		best_difficulty = 0.0;
 		had_prev_block = true;
 		
+		/* Start timing for all version tests */
+		hashes_done = 0;
+		gettimeofday(&tv_start, NULL);
+		
 		/* ASIC-MOD: Version rolling loop */
-		int version_idx;
 		for (version_idx = 0; version_idx < 10; version_idx++) {
+			unsigned long version_hashes = 0;
+			
 			/* Apply the magic version */
 			/* Note: work.data from getwork is already in network byte order.
 			 * No swab32 needed as this miner uses getwork protocol, not stratum.
@@ -677,15 +683,12 @@ static void *miner_thread(void *userdata)
 			applog(LOG_DEBUG, "[ASIC-MOD] Testing version %d/10: 0x%08x", 
 				version_idx + 1, MAGIC_VERSIONS[version_idx]);
 
-		hashes_done = 0;
-		gettimeofday(&tv_start, NULL);
-
 		/* scan nonces for a proof-of-work hash */
 		switch (opt_algo) {
 		case ALGO_C:
 			rc = scanhash_c(thr_id, work.midstate, work.data + 64,
 				        work.hash, work.target,
-					max_nonce, &hashes_done);
+					max_nonce, &version_hashes);
 			break;
 
 #ifdef WANT_X8664_SSE2
@@ -694,7 +697,7 @@ static void *miner_thread(void *userdata)
 			        scanhash_sse2_64(thr_id, work.midstate, work.data + 64,
 						 work.hash1, work.hash,
 						 work.target,
-					         max_nonce, &hashes_done);
+					         max_nonce, &version_hashes);
 			rc = (rc5 == -1) ? false : true;
 			}
 			break;
@@ -706,7 +709,7 @@ static void *miner_thread(void *userdata)
 				ScanHash_4WaySSE2(thr_id, work.midstate, work.data + 64,
 						  work.hash1, work.hash,
 						  work.target,
-						  max_nonce, &hashes_done);
+						  max_nonce, &version_hashes);
 			rc = (rc4 == -1) ? false : true;
 			}
 			break;
@@ -715,20 +718,20 @@ static void *miner_thread(void *userdata)
 #ifdef WANT_VIA_PADLOCK
 		case ALGO_VIA:
 			rc = scanhash_via(thr_id, work.data, work.target,
-					  max_nonce, &hashes_done);
+					  max_nonce, &version_hashes);
 			break;
 #endif
 		case ALGO_CRYPTOPP:
 			rc = scanhash_cryptopp(thr_id, work.midstate, work.data + 64,
 				        work.hash, work.target,
-					max_nonce, &hashes_done);
+					max_nonce, &version_hashes);
 			break;
 
 #ifdef WANT_CRYPTOPP_ASM32
 		case ALGO_CRYPTOPP_ASM32:
 			rc = scanhash_asm32(thr_id, work.midstate, work.data + 64,
 				        work.hash, work.target,
-					max_nonce, &hashes_done);
+					max_nonce, &version_hashes);
 			break;
 #endif
 
@@ -736,6 +739,9 @@ static void *miner_thread(void *userdata)
 			/* should never happen */
 			goto out;
 		}
+
+		/* Accumulate hashes from this version test */
+		hashes_done += version_hashes;
 
 		/* ASIC-MOD: Telemetry for successful shares */
 		if (rc) {
