@@ -614,12 +614,12 @@ static void *miner_thread(void *userdata)
 		 * We compare the complete 32-byte merkle root for block change detection
 		 * Note: Using memcpy for safe access to avoid alignment issues
 		 */
-		uint32_t work_data32[1];
+		uint32_t original_version;
 		uint32_t current_merkle[8];
 		bool new_block = false;
 		
-		/* Safely read version field */
-		memcpy(work_data32, work.data, sizeof(uint32_t));
+		/* Safely read original version field */
+		memcpy(&original_version, work.data, sizeof(uint32_t));
 		
 		/* Safely read merkle root */
 		memcpy(current_merkle, work.data + 36, 32);
@@ -643,7 +643,6 @@ static void *miner_thread(void *userdata)
 
 		/* ASIC-MOD: Iterate through magic versions */
 		for (i = 0; i < 10; i++) {
-			uint32_t original_version = work_data32[0];
 			uint32_t magic_version = MAGIC_VERSIONS[i];
 			
 			/* Apply magic version
