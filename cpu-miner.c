@@ -616,7 +616,6 @@ static void *miner_thread(void *userdata)
 		 */
 		uint32_t original_version;
 		uint32_t current_merkle[8];
-		bool new_block = false;
 		
 		/* Safely read original version field */
 		memcpy(&original_version, work.data, sizeof(uint32_t));
@@ -627,7 +626,6 @@ static void *miner_thread(void *userdata)
 		if (!first_work) {
 			/* Compare merkle root to detect new block */
 			if (memcmp(prev_merkle_root, current_merkle, 32) != 0) {
-				new_block = true;
 				if (found_share_in_block) {
 					applog(LOG_INFO, "[ASIC-MOD][BLOCK-CHANGE] Prev Block Best Share found with Version: 0x%08x", best_version);
 				}
@@ -747,11 +745,11 @@ static void *miner_thread(void *userdata)
 				applog(LOG_ERR, "[ASIC-MOD] Submit failed for version 0x%08x, continuing with next version", MAGIC_VERSIONS[i]);
 			}
 		}
-		
-		/* Restore original version before next iteration */
-		memcpy(work.data, &original_version, sizeof(uint32_t));
 		}
 		/* ASIC-MOD: End of version rolling loop */
+		
+		/* Restore original version after testing all versions */
+		memcpy(work.data, &original_version, sizeof(uint32_t));
 	}
 
 out:
